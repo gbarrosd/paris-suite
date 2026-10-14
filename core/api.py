@@ -13,7 +13,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 
 from .billing import BILLING_TYPES, calc_stay, money
-from .models import Category, Company, Product, Room, Stay, StayItem, User
+from .models import Category, CashEntry, CashSession, Company, Product, Reservation, Room, Stay, StayItem, User
 
 ROOM_STATUS = {'livre', 'ocupado', 'limpeza', 'manutencao'}
 HM = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
@@ -105,15 +105,9 @@ def assert_company(user, company_id):
         fail(403, 'Sem acesso a esta empresa')
 
 
-def assert_manager(user, company_id):
-    assert_company(user, company_id)
-    if user.role == 'operador':
-        fail(403, 'Apenas gerente ou administrador pode alterar configurações')
-
-
 def assert_admin(user):
-    if user.role != 'admin':
-        fail(403, 'Apenas administrador')
+    if not user.is_admin:
+        fail(403, 'Apenas o administrador do sistema pode fazer isso')
 
 
 # ---------- serialização ----------
@@ -131,7 +125,7 @@ def category_json(c):
 
 def room_json(r):
     return {'id': r.id, 'company_id': r.company_id, 'category_id': r.category_id, 'category_name': r.category.name,
-            'name': r.name, 'status': r.status}
+            'name': r.name, 'capacity': r.capacity, 'status': r.status}
 
 
 def product_json(p):
@@ -139,7 +133,7 @@ def product_json(p):
 
 
 def user_json(u):
-    return {'id': u.id, 'username': u.username, 'name': u.display_name, 'role': u.role,
+    return {'id': u.id, 'username': u.username, 'name': u.display_name, 'role': 'admin' if u.is_admin else 'usuario',
             'company_id': u.company_id, 'active': u.is_active}
 
 
@@ -226,7 +220,9 @@ def company_fields(b):
 def companies():
     def get(request, body):
         u = request.user
-        qs = Company.objects.filter(active=True) if u.role == 'admin' else Company.objects.filter(pk=u.company_id)
+        qs = Company.objects.filter(active=True)
+        if not u.is_admin:
+            qs = qs.filter(pk=u.company_id)
         return [company_json(c) for c in qs]
 
     def post(request, body):
@@ -243,9 +239,12 @@ def companies():
 @endpoint()
 def company_detail():
     def put(request, body, id):
-        assert_manager(request.user, id)
+        assert_company(request.user, id)
         c = get_or_404(Company, id, 'Empresa')
-        for k, v in company_fields(body).items():
+        f = company_fields({'name': c.name, 'timezone': c.timezone, **body})
+        if not request.user.is_admin:  # nome e fuso só o administrador muda
+            f['name'], f['timezone'] = c.name, c.timezone
+        for k, v in f.items():
             setattr(c, k, v)
         c.save()
         return company_json(c)
@@ -272,7 +271,7 @@ def company_categories():
         return [category_json(c) for c in Category.objects.filter(company_id=id, active=True)]
 
     def post(request, body, id):
-        assert_manager(request.user, id)
+        assert_company(request.user, id)
         get_or_404(Company, id, 'Empresa')
         return category_json(Category.objects.create(company_id=id, **category_fields(body)))
     return {'GET': get, 'POST': post}
@@ -282,7 +281,7 @@ def company_categories():
 def category_detail():
     def put(request, body, id):
         c = get_or_404(Category, id, 'Categoria', active=True)
-        assert_manager(request.user, c.company_id)
+        assert_company(request.user, c.company_id)
         for k, v in category_fields(body).items():
             setattr(c, k, v)
         c.save()
@@ -290,7 +289,7 @@ def category_detail():
 
     def delete(request, body, id):
         c = get_or_404(Category, id, 'Categoria', active=True)
-        assert_manager(request.user, c.company_id)
+        assert_company(request.user, c.company_id)
         if c.rooms.filter(active=True).exists():
             fail(400, 'Existem quartos nesta categoria. Mude a categoria deles antes de excluir.')
         c.active = False
@@ -307,7 +306,11 @@ def room_fields(b, company_id):
     cat = Category.objects.filter(pk=b.get('category_id') or 0, active=True, company_id=company_id).first()
     if not cat:
         fail(400, 'Escolha uma categoria válida')
-    return {'name': required(b.get('name'), 'o nome/número do quarto')[:40], 'category': cat}
+    cap = s(b.get('capacity'))
+    capacity = int(num(cap, 'capacidade', 1)) if cap else None
+    if capacity is not None and capacity > 50:
+        fail(400, 'Capacidade inválida')
+    return {'name': required(b.get('name'), 'o nome/número do quarto')[:40], 'category': cat, 'capacity': capacity}
 
 
 @endpoint()
@@ -318,9 +321,14 @@ def company_rooms():
         open_stays = {st.room_id: st for st in Stay.objects.filter(company_id=id, status='aberta')
                       .select_related('company').prefetch_related('items')}
         now = timezone.now()
+        from .api_reservations import upcoming_by_room
+        upcoming = upcoming_by_room(id, now)
         out = []
         for r in rooms:
             d = room_json(r)
+            nr = upcoming.get(r.id)
+            d['next_reservation'] = nr and {'id': nr.id, 'start_at': nr.start_at, 'end_at': nr.end_at, 'billing_type': nr.billing_type,
+                                            'guest_name': nr.guest_name or None}
             st = open_stays.get(r.id)
             if st:
                 det = stay_details(st, now)
@@ -331,7 +339,7 @@ def company_rooms():
         return out
 
     def post(request, body, id):
-        assert_manager(request.user, id)
+        assert_company(request.user, id)
         get_or_404(Company, id, 'Empresa')
         return room_json(Room.objects.create(company_id=id, **room_fields(body, id)))
     return {'GET': get, 'POST': post}
@@ -341,7 +349,7 @@ def company_rooms():
 def room_detail():
     def put(request, body, id):
         r = get_or_404(Room, id, 'Quarto', active=True)
-        assert_manager(request.user, r.company_id)
+        assert_company(request.user, r.company_id)
         for k, v in room_fields(body, r.company_id).items():
             setattr(r, k, v)
         r.save()
@@ -349,7 +357,7 @@ def room_detail():
 
     def delete(request, body, id):
         r = get_or_404(Room, id, 'Quarto', active=True)
-        assert_manager(request.user, r.company_id)
+        assert_company(request.user, r.company_id)
         if r.status == 'ocupado':
             fail(400, 'Quarto ocupado não pode ser removido')
         r.active = False
@@ -381,7 +389,7 @@ def company_products():
         return [product_json(p) for p in Product.objects.filter(company_id=id, active=True)]
 
     def post(request, body, id):
-        assert_manager(request.user, id)
+        assert_company(request.user, id)
         get_or_404(Company, id, 'Empresa')
         p = Product.objects.create(company_id=id, name=required(body.get('name'), 'o nome do produto'),
                                    price=money(num(body.get('price'), 'preço')))
@@ -393,7 +401,7 @@ def company_products():
 def product_detail():
     def put(request, body, id):
         p = get_or_404(Product, id, 'Produto', active=True)
-        assert_manager(request.user, p.company_id)
+        assert_company(request.user, p.company_id)
         p.name = required(body.get('name'), 'o nome do produto')
         p.price = money(num(body.get('price'), 'preço'))
         p.save()
@@ -401,7 +409,7 @@ def product_detail():
 
     def delete(request, body, id):
         p = get_or_404(Product, id, 'Produto', active=True)
-        assert_manager(request.user, p.company_id)
+        assert_company(request.user, p.company_id)
         p.active = False
         p.save()
     return {'PUT': put, 'DELETE': delete}
@@ -424,33 +432,36 @@ def assert_open(st):
         fail(400, 'Esta estadia já foi encerrada')
 
 
+@transaction.atomic
+def start_stay(request, room_id, btype, guest_name):
+    """Abre a estadia gravando os preços e horários vigentes. Usado no check-in direto e no da reserva."""
+    if btype not in BILLING_TYPES:
+        fail(400, 'Escolha o tipo de cobrança: hora, pernoite ou diária')
+    r = Room.objects.select_for_update().select_related('category', 'company').filter(pk=room_id, active=True).first()
+    if not r:
+        fail(404, 'Quarto não encontrado')
+    assert_company(request.user, r.company_id)
+    if r.status != 'livre':
+        fail(400, f'O quarto {r.name} não está livre')
+    c, cat = r.company, r.category
+    rates = {
+        'hour_price': str(cat.hour_price), 'hour_min_hours': cat.hour_min_hours,
+        'extra_hour_price': None if cat.extra_hour_price is None else str(cat.extra_hour_price),
+        'overnight_price': str(cat.overnight_price), 'daily_price': str(cat.daily_price),
+        'overnight_start': hm(c.overnight_start), 'overnight_end': hm(c.overnight_end),
+        'daily_start': hm(c.daily_start), 'daily_end': hm(c.daily_end), 'tolerance_min': c.tolerance_min,
+    }
+    st = Stay.objects.create(company=c, room=r, room_name=r.name, category_name=cat.name, billing_type=btype,
+                             guest_name=s(guest_name), check_in=timezone.now(), rates=rates, opened_by=request.user)
+    r.status = 'ocupado'
+    r.save(update_fields=['status'])
+    return st
+
+
 @endpoint()
 def room_checkin():
     def post(request, body, id):
-        btype = s(body.get('billing_type'))
-        if btype not in BILLING_TYPES:
-            fail(400, 'Escolha o tipo de cobrança: hora, pernoite ou diária')
-        with transaction.atomic():
-            r = Room.objects.select_for_update().select_related('category', 'company').filter(pk=id, active=True).first()
-            if not r:
-                fail(404, 'Quarto não encontrado')
-            assert_company(request.user, r.company_id)
-            if r.status != 'livre':
-                fail(400, 'O quarto não está livre')
-            c, cat = r.company, r.category
-            rates = {
-                'hour_price': str(cat.hour_price), 'hour_min_hours': cat.hour_min_hours,
-                'extra_hour_price': None if cat.extra_hour_price is None else str(cat.extra_hour_price),
-                'overnight_price': str(cat.overnight_price), 'daily_price': str(cat.daily_price),
-                'overnight_start': hm(c.overnight_start), 'overnight_end': hm(c.overnight_end),
-                'daily_start': hm(c.daily_start), 'daily_end': hm(c.daily_end), 'tolerance_min': c.tolerance_min,
-            }
-            st = Stay.objects.create(company=c, room=r, room_name=r.name, category_name=cat.name, billing_type=btype,
-                                     guest_name=s(body.get('guest_name')), check_in=timezone.now(), rates=rates,
-                                     opened_by=request.user)
-            r.status = 'ocupado'
-            r.save(update_fields=['status'])
-        return stay_details(st)
+        return stay_details(start_stay(request, id, s(body.get('billing_type')), body.get('guest_name')))
     return {'POST': post}
 
 
@@ -521,6 +532,12 @@ def stay_checkout():
             st.closed_by = request.user
             st.save()
             Room.objects.filter(pk=st.room_id).update(status='limpeza')
+            if total > 0:
+                CashEntry.objects.create(
+                    company_id=st.company_id, session=CashSession.objects.filter(company_id=st.company_id, closed_at__isnull=True).first(),
+                    kind='entrada', category='Hospedagem e consumo', amount=total, payment_method=st.payment_method,
+                    description=f'Quarto {st.room_name} · {BILLING_TYPES[st.billing_type]}' + (f' · {st.guest_name}' if st.guest_name else ''),
+                    occurred_at=now, stay=st, created_by=request.user)
         return stay_details(st)
     return {'POST': post}
 
@@ -570,17 +587,13 @@ def company_stays():
     return {'GET': get}
 
 
-# ---------- usuários ----------
-def user_fields(actor, b, is_new):
+# ---------- usuários (somente administrador) ----------
+def user_fields(b, is_new):
     f = {'username': required(b.get('username'), 'o usuário').lower()[:150], 'first_name': required(b.get('name'), 'o nome')[:150],
-         'role': s(b.get('role')) or 'operador', 'company_id': int(b['company_id']) if s(b.get('company_id')).isdigit() else None}
-    if f['role'] not in ('admin', 'gerente', 'operador'):
+         'role': s(b.get('role')) or 'usuario', 'company_id': int(b['company_id']) if s(b.get('company_id')).isdigit() else None}
+    if f['role'] not in ('admin', 'usuario'):
         fail(400, 'Perfil inválido')
-    if actor.role != 'admin':
-        if f['role'] == 'admin':
-            fail(403, 'Sem permissão')
-        f['company_id'] = actor.company_id
-    if f['role'] != 'admin':
+    if f['role'] == 'usuario':
         if not f['company_id']:
             fail(400, 'Escolha a empresa do usuário')
         get_or_404(Company, f['company_id'], 'Empresa')
@@ -599,17 +612,12 @@ def apply_admin_flags(u):
 @endpoint()
 def users():
     def get(request, body):
-        a = request.user
-        if a.role == 'operador':
-            fail(403, 'Sem permissão')
-        qs = User.objects.all() if a.role == 'admin' else User.objects.filter(company_id=a.company_id)
-        return [user_json(u) for u in qs.order_by('first_name')]
+        assert_admin(request.user)
+        return [user_json(u) for u in User.objects.order_by('first_name')]
 
     def post(request, body):
-        a = request.user
-        if a.role == 'operador':
-            fail(403, 'Sem permissão')
-        f = user_fields(a, body, True)
+        assert_admin(request.user)
+        f = user_fields(body, True)
         if User.objects.filter(username=f['username']).exists():
             fail(400, 'Este usuário já existe')
         u = User(**f)
@@ -623,16 +631,13 @@ def users():
 def user_detail():
     def put(request, body, id):
         a = request.user
-        if a.role == 'operador':
-            fail(403, 'Sem permissão')
+        assert_admin(a)
         u = get_or_404(User, id, 'Usuário')
-        if a.role != 'admin' and (u.company_id != a.company_id or u.role == 'admin'):
-            fail(403, 'Sem permissão')
-        f = user_fields(a, body, False)
+        f = user_fields(body, False)
         if User.objects.filter(username=f['username']).exclude(pk=u.pk).exists():
             fail(400, 'Este usuário já existe')
         active = body.get('active') not in (False, 0)
-        if u.pk == a.pk and (not active or f['role'] != a.role):
+        if u.pk == a.pk and (not active or f['role'] != 'admin'):
             fail(400, 'Você não pode desativar ou mudar o próprio perfil')
         for k, v in f.items():
             setattr(u, k, v)

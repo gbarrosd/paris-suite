@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import api, views
+from . import api, api_cash, api_reservations, views
 
 urlpatterns = [
     path('api/login', api.login_view),
@@ -23,6 +23,17 @@ urlpatterns = [
     path('api/stays/<int:id>/items/<int:item_id>', api.stay_item_detail),
     path('api/stays/<int:id>/checkout', api.stay_checkout),
     path('api/stays/<int:id>/cancel', api.stay_cancel),
+    path('api/companies/<int:id>/reservations', api_reservations.company_reservations),
+    path('api/companies/<int:id>/availability', api_reservations.company_availability),
+    path('api/reservations/<int:id>', api_reservations.reservation_detail),
+    path('api/reservations/<int:id>/<str:action>', api_reservations.reservation_action),
+    path('api/companies/<int:id>/cash', api_cash.company_cash),
+    path('api/companies/<int:id>/cash/sessions', api_cash.company_cash_sessions),
+    path('api/companies/<int:id>/cash/entries', api_cash.company_cash_entries),
+    path('api/cash/sessions/<int:id>', api_cash.cash_session_detail),
+    path('api/cash/sessions/<int:id>/close', api_cash.cash_session_close),
+    path('api/cash/entries/<int:id>/cancel', api_cash.cash_entry_cancel),
+    path('api/companies/<int:id>/report', api_cash.company_report),
     path('api/users', api.users),
     path('api/users/<int:id>', api.user_detail),
     path('', views.index),

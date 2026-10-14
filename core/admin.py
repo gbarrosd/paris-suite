@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import Category, Company, Product, Room, Stay, StayItem, User
+from .models import CashEntry, CashSession, Category, Company, Product, Reservation, Room, Stay, StayItem, User
 
 
 @admin.register(User)
@@ -23,7 +23,7 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Room)
 class RoomAdmin(admin.ModelAdmin):
-    list_display = ('name', 'company', 'category', 'status', 'active')
+    list_display = ('name', 'company', 'category', 'capacity', 'status', 'active')
     list_filter = ('company', 'status')
 
 
@@ -43,3 +43,27 @@ class StayAdmin(admin.ModelAdmin):
     list_display = ('id', 'company', 'room_name', 'billing_type', 'guest_name', 'check_in', 'check_out', 'status', 'total')
     list_filter = ('company', 'status', 'billing_type')
     inlines = [StayItemInline]
+
+
+@admin.register(Reservation)
+class ReservationAdmin(admin.ModelAdmin):
+    list_display = ('id', 'company', 'room', 'billing_type', 'start_at', 'end_at', 'guest_name', 'status')
+    list_filter = ('company', 'status', 'billing_type')
+
+
+class CashEntryInline(admin.TabularInline):
+    model = CashEntry
+    extra = 0
+
+
+@admin.register(CashSession)
+class CashSessionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'company', 'opened_at', 'opening_amount', 'closed_at', 'expected_cash', 'counted_cash')
+    list_filter = ('company',)
+    inlines = [CashEntryInline]
+
+
+@admin.register(CashEntry)
+class CashEntryAdmin(admin.ModelAdmin):
+    list_display = ('id', 'company', 'occurred_at', 'kind', 'category', 'amount', 'payment_method', 'cancelled_at')
+    list_filter = ('company', 'kind', 'category')

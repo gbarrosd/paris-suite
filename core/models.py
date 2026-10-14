@@ -24,8 +24,10 @@ class Company(models.Model):
 
 
 class User(AbstractUser):
-    ROLES = [('admin', 'Administrador'), ('gerente', 'Gerente'), ('operador', 'Operador')]
-    role = models.CharField('perfil', max_length=10, choices=ROLES, default='operador')
+    # Administrador: dono do sistema (todas as empresas, cadastra empresas e usuários).
+    # Usuário: opera e configura somente a própria empresa.
+    ROLES = [('admin', 'Administrador'), ('usuario', 'Usuário')]
+    role = models.CharField('perfil', max_length=10, choices=ROLES, default='usuario')
     company = models.ForeignKey(Company, verbose_name='empresa', null=True, blank=True, on_delete=models.PROTECT)
 
     class Meta:
@@ -35,8 +37,12 @@ class User(AbstractUser):
     def display_name(self):
         return self.first_name or self.username
 
+    @property
+    def is_admin(self):
+        return self.role == 'admin' or self.is_superuser
+
     def can_access(self, company_id):
-        return self.role == 'admin' or self.company_id == int(company_id)
+        return self.is_admin or (self.company_id is not None and self.company_id == int(company_id))
 
 
 class Category(models.Model):
@@ -63,6 +69,7 @@ class Room(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='rooms')
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='rooms')
     name = models.CharField('nome/número', max_length=40)
+    capacity = models.PositiveSmallIntegerField('capacidade (pessoas)', null=True, blank=True)
     status = models.CharField(max_length=12, choices=STATUS, default='livre')
     active = models.BooleanField(default=True)
 
@@ -133,3 +140,72 @@ class StayItem(models.Model):
         verbose_name = 'item de consumo'
         verbose_name_plural = 'itens de consumo'
         ordering = ['id']
+
+
+class Reservation(models.Model):
+    STATUS = [('agendada', 'Agendada'), ('iniciada', 'Iniciada'), ('cancelada', 'Cancelada'), ('nao_compareceu', 'Não compareceu')]
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='reservations')
+    room = models.ForeignKey(Room, on_delete=models.PROTECT, related_name='reservations')
+    billing_type = models.CharField('cobrança', max_length=10, choices=Stay.BILLING)
+    start_at = models.DateTimeField('início')
+    end_at = models.DateTimeField('fim previsto')
+    hours = models.PositiveSmallIntegerField('horas (por hora)', null=True, blank=True)
+    days = models.PositiveSmallIntegerField('diárias', null=True, blank=True)
+    guest_name = models.CharField('cliente', max_length=120, blank=True, default='')
+    guest_phone = models.CharField('telefone', max_length=40, blank=True, default='')
+    people = models.PositiveSmallIntegerField('pessoas', null=True, blank=True)
+    notes = models.CharField('observação', max_length=500, blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS, default='agendada')
+    stay = models.OneToOneField(Stay, null=True, blank=True, on_delete=models.SET_NULL, related_name='reservation')
+    created_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'reserva'
+        ordering = ['start_at']
+        indexes = [models.Index(fields=['company', 'status', 'start_at'])]
+
+    def __str__(self):
+        return f'Reserva {self.pk} · quarto {self.room.name}'
+
+
+class CashSession(models.Model):
+    """Turno de caixa: abertura com troco e fechamento com o valor contado em dinheiro."""
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='cash_sessions')
+    opened_at = models.DateTimeField('abertura')
+    opened_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='+')
+    opening_amount = models.DecimalField('troco inicial', max_digits=10, decimal_places=2, default=Decimal('0'))
+    closed_at = models.DateTimeField('fechamento', null=True, blank=True)
+    closed_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='+')
+    expected_cash = models.DecimalField('dinheiro esperado', max_digits=10, decimal_places=2, null=True, blank=True)
+    counted_cash = models.DecimalField('dinheiro contado', max_digits=10, decimal_places=2, null=True, blank=True)
+    notes = models.CharField('observação', max_length=500, blank=True, default='')
+
+    class Meta:
+        verbose_name = 'turno de caixa'
+        verbose_name_plural = 'turnos de caixa'
+        ordering = ['-opened_at']
+        constraints = [models.UniqueConstraint(fields=['company'], condition=models.Q(closed_at__isnull=True), name='um_caixa_aberto_por_empresa')]
+
+
+class CashEntry(models.Model):
+    """Lançamento do fluxo de caixa. Estadias fechadas geram entradas automáticas."""
+    KINDS = [('entrada', 'Entrada'), ('saida', 'Saída')]
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='cash_entries')
+    session = models.ForeignKey(CashSession, null=True, blank=True, on_delete=models.SET_NULL, related_name='entries')
+    kind = models.CharField('tipo', max_length=8, choices=KINDS)
+    category = models.CharField('categoria', max_length=60)
+    description = models.CharField('descrição', max_length=200, blank=True, default='')
+    amount = models.DecimalField('valor', max_digits=10, decimal_places=2)
+    payment_method = models.CharField('forma de pagamento', max_length=40, blank=True, default='')
+    occurred_at = models.DateTimeField('data')
+    stay = models.OneToOneField(Stay, null=True, blank=True, on_delete=models.SET_NULL, related_name='cash_entry')
+    created_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='+')
+    cancelled_at = models.DateTimeField('estornado em', null=True, blank=True)
+    cancelled_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='+')
+
+    class Meta:
+        verbose_name = 'lançamento de caixa'
+        verbose_name_plural = 'lançamentos de caixa'
+        ordering = ['-occurred_at']
+        indexes = [models.Index(fields=['company', 'occurred_at'])]
