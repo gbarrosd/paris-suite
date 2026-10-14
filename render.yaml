@@ -1,0 +1,47 @@
+# Render: demonstração grátis do Paris Suite.
+# No painel do Render: New > Blueprint > escolha este repositório. Ele cria o banco e o sistema juntos.
+# Atenção: no plano grátis o banco é apagado 30 dias depois de criado.
+databases:
+  - name: paris-suite-db
+    plan: free
+    region: virginia
+    databaseName: motel
+    user: motel
+
+services:
+  - type: web
+    name: paris-suite
+    runtime: docker
+    plan: free
+    region: virginia
+    envVars:
+      - key: POSTGRES_HOST
+        fromDatabase: {name: paris-suite-db, property: host}
+      - key: POSTGRES_PORT
+        fromDatabase: {name: paris-suite-db, property: port}
+      - key: POSTGRES_DB
+        fromDatabase: {name: paris-suite-db, property: database}
+      - key: POSTGRES_USER
+        fromDatabase: {name: paris-suite-db, property: user}
+      - key: POSTGRES_PASSWORD
+        fromDatabase: {name: paris-suite-db, property: password}
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "0"
+      - key: DJANGO_ALLOWED_HOSTS
+        value: "*"
+      # Endereço do sistema no Render. Se o Render der outro nome (ex.: paris-suite-ab12), troque aqui.
+      - key: DJANGO_CSRF_TRUSTED_ORIGINS
+        value: https://paris-suite.onrender.com
+      - key: DJANGO_SECURE_COOKIES
+        value: "1"
+      - key: PORT
+        value: "8000"
+      - key: ADMIN_USERNAME
+        value: admin
+      # O Render pede esta senha ao criar o Blueprint.
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DEMO_DATA
+        value: "1"

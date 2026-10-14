@@ -1,0 +1,5 @@
+# Caddy recebe o acesso pelo domínio, gera o certificado HTTPS sozinho e repassa para o Django.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy web:8000
+}
